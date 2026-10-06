@@ -215,7 +215,10 @@ class GlobalVoiceController {
     lines.on('line', (line) => {
       try {
         const value = JSON.parse(line)
-        if (value.type === 'action') this.publish({ type: 'overlay-action', action: value.action, text: value.text })
+        if (value.type === 'action') this.publish({
+          type: 'overlay-action', action: value.action, text: value.text,
+          sessionId: value.sessionId
+        })
       } catch {
         this.publish({ type: 'error', code: 'overlay-output', message: 'The desktop overlay returned invalid data.' })
       }

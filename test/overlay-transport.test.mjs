@@ -39,7 +39,7 @@ test('DSH gateway reproduces the old default-parameter failure', async () => {
 })
 
 test('DSH gateway delivers recording, level, reply and stop to the native overlay', {
-  skip: process.platform !== 'win32', timeout: 20000
+  skip: process.platform !== 'win32', timeout: 60000, concurrency: false
 }, async (t) => {
   const { controller, report } = setup()
   const child = spawn('powershell.exe', [
@@ -56,7 +56,10 @@ test('DSH gateway delivers recording, level, reply and stop to the native overla
   const iterator = lines[Symbol.asyncIterator]()
   const read = async (type) => {
     for (;;) {
-      const item = await iterator.next()
+      let timer
+      const item = await Promise.race([iterator.next(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`No ${type}: ${diagnostic}`)), 15000)
+      })]).finally(() => clearTimeout(timer))
       assert.equal(item.done, false, diagnostic || 'Overlay exited before acknowledgement')
       const event = JSON.parse(item.value)
       assert.notEqual(event.type, 'error', event.message)
@@ -107,4 +110,36 @@ test('DSH gateway delivers recording, level, reply and stop to the native overla
   assert.equal(await report({ phase: 'recording', revision: 1 }), false, 'Stale state must not restore recording')
   assert.equal((await send({ phase: 'feedback', message: '测试错误提示' })).waveform, false)
   assert.equal((await send({ phase: 'idle' })).waveform, false)
+  const replies = [
+    { id: 'A-1', sessionId: 'A', title: '任务 A', text: '第一条回复', state: 'done', unread: true },
+    { id: 'B-1', sessionId: 'B', title: '任务 B', text: '第二条回复', state: 'streaming', unread: true }
+  ]
+  const cards = await send({ phase: 'idle', replies, replyUnread: 1, expanded: true, showReplyPreview: true })
+  assert.equal(cards.cardCount, 2)
+  assert.equal(cards.replyVisible, true)
+  assert.equal(cards.replyUnread, 1)
+  for (let index = 0; index < 5; index++) {
+    const level = index / 5
+    const update = await send({ phase: 'recording', level, replies, replyUnread: 1, expanded: true })
+    assert.equal(update.cardsGeneration, cards.cardsGeneration, 'Audio updates must reuse cards')
+    assert.deepEqual(update.heightChanges, [])
+    assert.equal(update.level, level)
+  }
+  child.stdin.write(`${JSON.stringify({ type: 'test-click-reply', index: 1 })}\n`)
+  const action = await read('action')
+  assert.equal(action.action, 'openReply')
+  assert.equal(action.sessionId, 'B')
+  const empty = await send({ phase: 'idle', replies: [], replyUnread: 0, expanded: true })
+  assert.equal(empty.cardCount, 0)
+  assert.equal(empty.replyVisible, false)
+  assert.equal(empty.replyButtonVisible, false)
+  assert.equal(empty.height, 48)
+  const thinking = await send({ phase: 'idle', replies: [
+    { id: 'A-waiting', sessionId: 'A', title: '任务 A', text: '', state: 'streaming', unread: false }
+  ], expanded: true })
+  assert.equal(thinking.replyButtonVisible, true, 'Thinking before the first text token must be expandable')
+  assert.equal(thinking.replyVisible, true)
+  const partial = await send({ phase: 'requesting' })
+  assert.equal(partial.replyButtonVisible, true, 'Hotkey feedback must preserve the thinking card')
+  assert.equal(partial.replyVisible, true)
 })

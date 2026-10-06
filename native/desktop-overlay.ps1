@@ -13,6 +13,19 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class DshOverlayNative {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extra);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr extra);
+  public static void Focus(int[] processIds) {
+    EnumWindows((hWnd, _) => {
+      uint id; GetWindowThreadProcessId(hWnd, out id);
+      if (Array.IndexOf(processIds, (int)id) < 0 || !IsWindowVisible(hWnd)) return true;
+      ShowWindowAsync(hWnd, 9); SetForegroundWindow(hWnd); return false;
+    }, IntPtr.Zero);
+  }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
@@ -44,6 +57,16 @@ function Write-Event($value) {
 
 $queue = [DshOverlayInput]::Queue
 $reader = [DshOverlayInput]::Start()
+$script:dshWindowPids = @()
+if (-not $SelfTest -and -not $StateTest) {
+  $ancestorId = $ParentPid
+  for ($depth = 0; $depth -lt 6 -and $ancestorId -gt 0; $depth++) {
+    $ancestor = Get-CimInstance Win32_Process -Filter "ProcessId = $ancestorId" -ErrorAction SilentlyContinue
+    if ($null -eq $ancestor) { break }
+    if ($ancestor.Name -eq 'DeepSeek Harness.exe') { $script:dshWindowPids += [int]$ancestorId }
+    $ancestorId = [int]$ancestor.ParentProcessId
+  }
+}
 
 $window = [System.Windows.Window]::new()
 $window.Title = 'DSH 全局语音输入'
@@ -60,25 +83,52 @@ $window.Left = [System.Windows.SystemParameters]::WorkArea.Right - $window.Width
 $window.Top = [System.Windows.SystemParameters]::WorkArea.Bottom - $window.Height - 24
 $script:hasCustomPosition = $false
 
+$script:anchorBottom = [System.Windows.SystemParameters]::WorkArea.Bottom - 24
+
 $root = [System.Windows.Controls.Border]::new()
-$root.CornerRadius = [System.Windows.CornerRadius]::new(24)
-$root.Padding = [System.Windows.Thickness]::new(8, 5, 8, 5)
-$root.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EE202124')
-$root.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#553F4147')
-$root.BorderThickness = [System.Windows.Thickness]::new(1)
-$root.Effect = [System.Windows.Media.Effects.DropShadowEffect]@{ BlurRadius = 18; ShadowDepth = 3; Opacity = 0.35; Color = [System.Windows.Media.Colors]::Black }
+$root.Background = [System.Windows.Media.Brushes]::Transparent
 
 $panel = [System.Windows.Controls.StackPanel]::new()
 $panel.Orientation = [System.Windows.Controls.Orientation]::Vertical
-$panel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Stretch
-$panel.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+$panel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+$panel.VerticalAlignment = [System.Windows.VerticalAlignment]::Bottom
 $root.Child = $panel
 $window.Content = $root
+
+# 上方独立回复卡片列表容器（向上展开）
+$replyArea = [System.Windows.Controls.StackPanel]::new()
+$replyArea.Orientation = [System.Windows.Controls.Orientation]::Vertical
+$replyArea.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+$replyArea.Visibility = [System.Windows.Visibility]::Collapsed
+$replyScroller = [System.Windows.Controls.ScrollViewer]::new()
+$replyScroller.Content = $replyArea
+$replyScroller.MaxHeight = [Math]::Min(440, [System.Windows.SystemParameters]::WorkArea.Height - 120)
+$replyScroller.VerticalScrollBarVisibility = 'Auto'
+$replyScroller.HorizontalScrollBarVisibility = 'Disabled'
+$replyScroller.Visibility = 'Collapsed'
+$panel.Children.Add($replyScroller) | Out-Null
+
+# 底部主控制胶囊（尺寸恒定药丸胶囊，绝不变形）
+$capsuleBorder = [System.Windows.Controls.Border]::new()
+$capsuleBorder.CornerRadius = [System.Windows.CornerRadius]::new(24)
+$capsuleBorder.Padding = [System.Windows.Thickness]::new(8, 5, 8, 5)
+$capsuleBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EE202124')
+$capsuleBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#553F4147')
+$capsuleBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+$capsuleBorder.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+$capsuleBorder.Effect = [System.Windows.Media.Effects.DropShadowEffect]@{ BlurRadius = 18; ShadowDepth = 3; Opacity = 0.35; Color = [System.Windows.Media.Colors]::Black }
+
+$capsulePanel = [System.Windows.Controls.StackPanel]::new()
+$capsulePanel.Orientation = [System.Windows.Controls.Orientation]::Vertical
+$capsulePanel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Stretch
+$capsulePanel.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+$capsuleBorder.Child = $capsulePanel
+$panel.Children.Add($capsuleBorder) | Out-Null
 
 $row = [System.Windows.Controls.StackPanel]::new()
 $row.Orientation = [System.Windows.Controls.Orientation]::Horizontal
 $row.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
-$panel.Children.Add($row) | Out-Null
+$capsulePanel.Children.Add($row) | Out-Null
 
 function New-IconButton([string]$label, [string]$tooltip) {
   $button = [System.Windows.Controls.Button]::new()
@@ -92,6 +142,42 @@ function New-IconButton([string]$label, [string]$tooltip) {
   $button.Foreground = [System.Windows.Media.Brushes]::White
   $button.Background = [System.Windows.Media.Brushes]::Transparent
   $button.BorderBrush = [System.Windows.Media.Brushes]::Transparent
+  $button.Focusable = $false
+
+  # The default WPF Button chrome draws a square pressed/focus rectangle over
+  # the icon. Use a small rounded template so the selected state stays inside
+  # the same circular capsule as the rest of the overlay.
+  $template = [System.Windows.Controls.ControlTemplate]::new([System.Windows.Controls.Button])
+  $chrome = [System.Windows.FrameworkElementFactory]::new([System.Windows.Controls.Border])
+  $chrome.Name = 'chrome'
+  $chrome.SetValue([System.Windows.FrameworkElement]::WidthProperty, [double]34)
+  $chrome.SetValue([System.Windows.FrameworkElement]::HeightProperty, [double]34)
+  $chrome.SetValue([System.Windows.Controls.Border]::CornerRadiusProperty, [System.Windows.CornerRadius]::new(18))
+  $chrome.SetValue([System.Windows.Controls.Border]::BackgroundProperty, [System.Windows.Media.Brushes]::Transparent)
+  $chrome.SetValue([System.Windows.Controls.Border]::BorderBrushProperty, [System.Windows.Media.Brushes]::Transparent)
+  $chrome.SetValue([System.Windows.Controls.Border]::BorderThicknessProperty, [System.Windows.Thickness]::new(0))
+  $content = [System.Windows.FrameworkElementFactory]::new([System.Windows.Controls.ContentPresenter])
+  $content.SetValue([System.Windows.Controls.ContentPresenter]::HorizontalAlignmentProperty, [System.Windows.HorizontalAlignment]::Center)
+  $content.SetValue([System.Windows.Controls.ContentPresenter]::VerticalAlignmentProperty, [System.Windows.VerticalAlignment]::Center)
+  $chrome.AppendChild($content)
+  $template.VisualTree = $chrome
+  $pressed = [System.Windows.Trigger]::new()
+  $pressed.Property = [System.Windows.Controls.Button]::IsPressedProperty
+  $pressed.Value = $true
+  $pressed.Setters.Add([System.Windows.Setter]::new(
+    [System.Windows.Controls.Border]::BackgroundProperty,
+    [System.Windows.Media.BrushConverter]::new().ConvertFromString('#553B82F6'),
+    'chrome'))
+  $hover = [System.Windows.Trigger]::new()
+  $hover.Property = [System.Windows.Controls.Button]::IsMouseOverProperty
+  $hover.Value = $true
+  $hover.Setters.Add([System.Windows.Setter]::new(
+    [System.Windows.Controls.Border]::BackgroundProperty,
+    [System.Windows.Media.BrushConverter]::new().ConvertFromString('#333B82F6'),
+    'chrome'))
+  $template.Triggers.Add($hover)
+  $template.Triggers.Add($pressed)
+  $button.Template = $template
   return $button
 }
 
@@ -205,7 +291,19 @@ $textButton.Content = New-KeyboardVisual
 $voiceButton = New-IconButton '' '开始语音输入'
 $voiceButton.Content = $micIdle
 $replyButton = New-IconButton '' '展开回复'
-$replyButton.Content = $chevronDown
+$replyButtonVisual = [System.Windows.Controls.Grid]::new()
+$replyChevron = [System.Windows.Controls.ContentControl]::new()
+$replyChevron.Content = $chevronDown
+$replyButtonVisual.Children.Add($replyChevron) | Out-Null
+$replyBadge = [System.Windows.Controls.TextBlock]::new()
+$replyBadge.FontSize = 10
+$replyBadge.Foreground = [System.Windows.Media.Brushes]::LightGreen
+$replyBadge.HorizontalAlignment = 'Right'
+$replyBadge.VerticalAlignment = 'Top'
+$replyBadge.Margin = [System.Windows.Thickness]::new(20, -5, -9, 0)
+$replyButtonVisual.Children.Add($replyBadge) | Out-Null
+$replyButton.Content = $replyButtonVisual
+$replyButton.Visibility = [System.Windows.Visibility]::Collapsed
 $wavePanel = [System.Windows.Controls.StackPanel]::new()
 $wavePanel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
 $wavePanel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
@@ -235,53 +333,115 @@ $textBox.Visibility = [System.Windows.Visibility]::Collapsed
 $textBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FF2B2D31')
 $textBox.Foreground = [System.Windows.Media.Brushes]::White
 $textBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#664F525A')
-$panel.Children.Add($textBox) | Out-Null
+$capsulePanel.Children.Add($textBox) | Out-Null
+
+function New-StatusDot([bool]$inProgress = $true) {
+  $grid = [System.Windows.Controls.Grid]::new()
+  $grid.Width = 10
+  $grid.Height = 10
+  $grid.Margin = [System.Windows.Thickness]::new(6, 0, 0, 0)
+  $grid.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+  $dot = [System.Windows.Shapes.Ellipse]::new()
+  $dot.Width = 8
+  $dot.Height = 8
+  $dot.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+  $dot.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+  if ($inProgress) {
+    # 进行中：天蓝色圆点 + 呼吸闪烁
+    $dot.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FF38BDF8')
+    $anim = [System.Windows.Media.Animation.DoubleAnimation]::new()
+    $anim.From = 1.0
+    $anim.To = 0.25
+    $anim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(650))
+    $anim.AutoReverse = $true
+    $anim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $dot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $anim)
+  } else {
+    # 已完成：绿色圆点，常亮
+    $dot.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FF10B981')
+  }
+
+  $grid.Children.Add($dot) | Out-Null
+  return $grid
+}
+
+# 默认回复卡片（包装现有单 reply 输出，保持与测试完全兼容）
+$defaultReplyCard = [System.Windows.Controls.Border]::new()
+$defaultReplyCard.Width = 340
+$defaultReplyCard.CornerRadius = [System.Windows.CornerRadius]::new(18)
+$defaultReplyCard.Padding = [System.Windows.Thickness]::new(14, 10, 14, 10)
+$defaultReplyCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+$defaultReplyCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F2202124')
+$defaultReplyCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#553F4147')
+$defaultReplyCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$defaultReplyCard.Effect = [System.Windows.Media.Effects.DropShadowEffect]@{ BlurRadius = 14; ShadowDepth = 2; Opacity = 0.4; Color = [System.Windows.Media.Colors]::Black }
+
+$defaultCardStack = [System.Windows.Controls.StackPanel]::new()
+$defaultCardStack.Orientation = [System.Windows.Controls.Orientation]::Vertical
+
+$defaultTitleRow = [System.Windows.Controls.DockPanel]::new()
+$defaultTitleRow.LastChildFill = $true
+
+$script:defaultStatusHost = [System.Windows.Controls.ContentControl]::new()
+[System.Windows.Controls.DockPanel]::SetDock($script:defaultStatusHost, [System.Windows.Controls.Dock]::Right)
+$defaultTitleRow.Children.Add($script:defaultStatusHost) | Out-Null
+
+$script:defaultTitleText = [System.Windows.Controls.TextBlock]::new()
+$script:defaultTitleText.Text = '当前会话'
+$script:defaultTitleText.FontWeight = [System.Windows.FontWeights]::SemiBold
+$script:defaultTitleText.FontSize = 13
+$script:defaultTitleText.Foreground = [System.Windows.Media.Brushes]::White
+$script:defaultTitleText.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+$defaultTitleRow.Children.Add($script:defaultTitleText) | Out-Null
+$defaultCardStack.Children.Add($defaultTitleRow) | Out-Null
 
 $replyText = [System.Windows.Controls.TextBlock]::new()
 $replyText.TextWrapping = [System.Windows.TextWrapping]::Wrap
 $replyText.MaxHeight = 150
-$replyText.MinHeight = 28
-$replyText.FontSize = 13
-$replyText.Margin = [System.Windows.Thickness]::new(7, 7, 7, 3)
+$replyText.MinHeight = 22
+$replyText.FontSize = 12
+$replyText.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
 $replyText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFD6D8DE')
-$replyText.Visibility = [System.Windows.Visibility]::Collapsed
-$panel.Children.Add($replyText) | Out-Null
+$defaultCardStack.Children.Add($replyText) | Out-Null
+
+$defaultReplyCard.Child = $defaultCardStack
+$replyArea.Children.Add($defaultReplyCard) | Out-Null
 
 function Update-Layout {
   $inputVisible = $textBox.Visibility -eq [System.Windows.Visibility]::Visible
-  $replyVisible = $replyText.Visibility -eq [System.Windows.Visibility]::Visible
+  $replyVisible = $replyArea.Visibility -eq [System.Windows.Visibility]::Visible
   $targetWidth = if ($inputVisible -or $replyVisible) { 340 } else { 178 }
   $targetHeight = 48
   if ($inputVisible) { $targetHeight += 40 }
   if ($replyVisible) {
-    # Do not reserve a fixed 160px block for a short or empty reply. WPF has
-    # to measure the TextBlock after changing Visibility, otherwise the
-    # expanded capsule becomes a large blank rectangle.
-    $replyText.Measure([System.Windows.Size]::new(320, 150))
-    $replyHeight = [Math]::Min(150, [Math]::Max(28, [double]$replyText.DesiredSize.Height))
-    $targetHeight += [int][Math]::Ceiling($replyHeight) + 10
+    # 测量上方卡片区域高度，保持向上生长
+    $replyScroller.Measure([System.Windows.Size]::new(340, $replyScroller.MaxHeight))
+    $replyHeight = [Math]::Max(36, [double]$replyScroller.DesiredSize.Height)
+    $targetHeight += [int][Math]::Ceiling($replyHeight)
   }
-  # Assigning the same WPF size on every microphone level/reply chunk causes
-  # a topmost transparent window to repaint and visibly flash. Resize only
-  # when the target dimensions actually changed.
   $sizeChanged = $window.Width -ne $targetWidth -or $window.Height -ne $targetHeight
   if ($sizeChanged) {
     $window.Width = $targetWidth
     $window.Height = $targetHeight
   }
-  if ($sizeChanged -and -not $script:hasCustomPosition) {
-    $window.Left = [System.Windows.SystemParameters]::WorkArea.Right - $window.Width - 24
-    $window.Top = [System.Windows.SystemParameters]::WorkArea.Bottom - $window.Height - 24
+  if ($sizeChanged -or -not $script:hasCustomPosition) {
+    if (-not $script:hasCustomPosition) {
+      $script:anchorBottom = [System.Windows.SystemParameters]::WorkArea.Bottom - 24
+      $window.Left = [System.Windows.SystemParameters]::WorkArea.Right - $targetWidth - 24
+    }
+    $window.Top = $script:anchorBottom - $targetHeight
   }
 }
 
 function Set-Expanded([bool]$expanded) {
   if ($script:expanded -eq $expanded) { return }
   $script:expanded = $expanded
+  $replyArea.Visibility = if ($expanded) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+  $replyScroller.Visibility = $replyArea.Visibility
   $replyText.Visibility = if ($expanded) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-  $replyButton.Content = if ($expanded) { $chevronUp } else { $chevronDown }
-  $replyButton.ToolTip = if ($expanded) { '收起回复' } else { '展开回复' }
-  if ($expanded -and [string]::IsNullOrWhiteSpace($replyText.Text)) { $replyText.Text = '等待当前 Session 回复…' }
+  Update-Reply-Button
   Update-Layout
 }
 
@@ -291,10 +451,14 @@ function Set-TextOpen([bool]$open) {
   if ($open) { $textBox.Focus() | Out-Null }
 }
 
-function Send-Action([string]$action, [string]$text) {
+function Send-Action([string]$action, [string]$text, [string]$sessionId) {
   $event = @{ type = 'action'; action = $action }
   if ($null -ne $text) { $event.text = $text }
+  if ($null -ne $sessionId) { $event.sessionId = $sessionId }
   Write-Event $event
+  if ($action -eq 'openReply' -and $script:dshWindowPids.Count -gt 0) {
+    [DshOverlayNative]::Focus([int[]]$script:dshWindowPids)
+  }
 }
 
 $textButton.Add_Click({ Set-TextOpen ($textBox.Visibility -ne [System.Windows.Visibility]::Visible); if ($textBox.Visibility -eq [System.Windows.Visibility]::Visible) { Send-Action 'openInput' $null } })
@@ -309,12 +473,29 @@ $phase = 'idle'
 $expanded = $false
 $script:audioLevel = 0
 $script:waveTick = 0
+$script:replyUnread = 0
+$script:replyTotal = 0
+$script:replyCardsSignature = ''
+$script:replyCards = @()
+$script:replyListMode = $false
+$script:previewEnabled = $true
+$script:cardsGeneration = 0
+
+function Update-Reply-Button {
+  $arrow = if ($script:expanded) { $chevronUp } else { $chevronDown }
+  if ($replyChevron.Content -ne $arrow) { $replyChevron.Content = $arrow }
+  $badgeText = if ($script:replyUnread -gt 99) { '99+' } elseif ($script:replyUnread -gt 0) { [string]$script:replyUnread } else { '' }
+  if ($replyBadge.Text -ne $badgeText) { $replyBadge.Text = $badgeText }
+  $replyButton.ToolTip = if ($script:replyUnread -gt 0) {
+    "展开回复（$script:replyUnread 条新回复）"
+  } elseif ($script:expanded) { '收起回复' } else { '展开回复' }
+}
 
 function Set-Visual-Phase([string]$nextPhase, [double]$level = 0) {
   $resolvedPhase = if ([string]::IsNullOrWhiteSpace($nextPhase)) { 'idle' } else { $nextPhase }
   $phaseChanged = $script:phase -ne $resolvedPhase
   $script:phase = $resolvedPhase
-  $script:audioLevel = [Math]::Max(0, [Math]::Min(1, $level))
+  $script:audioLevel = [Math]::Max([double]0, [Math]::Min([double]1, $level))
   if ($script:phase -eq 'recording') {
     if ($phaseChanged) {
       $micRequesting.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
@@ -352,10 +533,11 @@ function Set-Visual-Phase([string]$nextPhase, [double]$level = 0) {
 
 # The capsule has no title bar. Drag any empty part of it to move the window;
 # button and text-box clicks keep their normal actions.
-$root.Add_MouseLeftButtonDown({ param($sender, $event)
-  if ($event.OriginalSource -is [System.Windows.Controls.Button] -or $event.OriginalSource -is [System.Windows.Controls.TextBox]) { return }
+$capsuleBorder.Add_MouseLeftButtonDown({ param($sender, $event)
+  if ($event.OriginalSource -is [System.Windows.Controls.Button] -or $event.OriginalSource -is [System.Windows.Controls.TextBox] -or $event.OriginalSource -is [System.Windows.Controls.TextBlock]) { return }
   $script:hasCustomPosition = $true
   $window.DragMove()
+  $script:anchorBottom = $window.Top + $window.Height
   $event.Handled = $true
 })
 
@@ -368,24 +550,95 @@ $window.Show() | Out-Null
 Write-Event @{ type = 'overlay-ready' }
 
 function Apply-State($value) {
-  $nextPhase = if ($null -eq $value.phase) { 'idle' } else { [string]$value.phase }
+  $nextPhase = if ($null -eq $value.phase) { $script:phase } else { [string]$value.phase }
   $level = if ($null -eq $value.level) { 0 } else { [double]$value.level }
   Set-Visual-Phase $nextPhase $level
   if ($value.message) { $voiceButton.ToolTip = [string]$value.message }
   $replyChanged = $false
-  if ($null -ne $value.reply) {
-    $nextReply = if ([string]::IsNullOrWhiteSpace([string]$value.reply)) { '等待当前 Session 回复…' } else { [string]$value.reply }
-    if ($replyText.Text -ne $nextReply) {
+  $hasList = $null -ne $value.PSObject.Properties['replies']
+  if ($hasList) { $script:replyListMode = $true }
+  elseif ($null -ne $value.reply) { $script:replyListMode = $false }
+  $cardsSignature = if ($hasList) { ConvertTo-Json -InputObject @($value.replies) -Compress -Depth 5 } else { $script:replyCardsSignature }
+  if ($hasList -and $cardsSignature -ne $script:replyCardsSignature) {
+    $script:replyCardsSignature = $cardsSignature
+    $script:replyCards = @($value.replies)
+    $script:cardsGeneration++
+    $replyChanged = $true
+    $replyArea.Children.Clear()
+    foreach ($item in $script:replyCards) {
+      $itemTitle = if ([string]::IsNullOrWhiteSpace([string]$item.title)) { '会话任务' } else { [string]$item.title }
+      $itemText = if ([string]::IsNullOrWhiteSpace([string]$item.text)) { '正在思考…' } else { [string]$item.text }
+      $isDone = ($item.state -eq 'done' -or $item.state -eq 'completed')
+
+      $card = [System.Windows.Controls.Border]::new()
+      $card.Width = 340
+      $card.CornerRadius = [System.Windows.CornerRadius]::new(18)
+      $card.Padding = [System.Windows.Thickness]::new(14, 10, 14, 10)
+      $card.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+      $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F2202124')
+      $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#553F4147')
+      $card.BorderThickness = [System.Windows.Thickness]::new(1)
+      $card.Effect = [System.Windows.Media.Effects.DropShadowEffect]@{ BlurRadius = 14; ShadowDepth = 2; Opacity = 0.4; Color = [System.Windows.Media.Colors]::Black }
+      $card.Cursor = [System.Windows.Input.Cursors]::Hand
+      $card.Add_MouseLeftButtonDown({ param($sender, $event) $event.Handled = $true }.GetNewClosure())
+      $card.Add_MouseLeftButtonUp({ param($sender, $event)
+        Send-Action 'openReply' $null ([string]$sender.Tag)
+        $event.Handled = $true
+      })
+      $card.Tag = [string]$item.sessionId
+
+      $stack = [System.Windows.Controls.StackPanel]::new()
+      $stack.Orientation = [System.Windows.Controls.Orientation]::Vertical
+
+      $tRow = [System.Windows.Controls.DockPanel]::new()
+      $tRow.LastChildFill = $true
+
+      $dot = New-StatusDot (-not $isDone)
+      [System.Windows.Controls.DockPanel]::SetDock($dot, [System.Windows.Controls.Dock]::Right)
+      $tRow.Children.Add($dot) | Out-Null
+
+      $tb = [System.Windows.Controls.TextBlock]::new()
+      $tb.Text = $itemTitle
+      $tb.FontWeight = [System.Windows.FontWeights]::SemiBold
+      $tb.FontSize = 13
+      $tb.Foreground = [System.Windows.Media.Brushes]::White
+      $tb.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+      $tRow.Children.Add($tb) | Out-Null
+      $stack.Children.Add($tRow) | Out-Null
+
+      $bb = [System.Windows.Controls.TextBlock]::new()
+      $bb.Text = $itemText
+      $bb.FontSize = 12
+      $bb.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+      $bb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFD6D8DE')
+      $bb.TextWrapping = [System.Windows.TextWrapping]::Wrap
+      $bb.MaxHeight = 36
+      $bb.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+      $stack.Children.Add($bb) | Out-Null
+
+      $card.Child = $stack
+      $replyArea.Children.Add($card) | Out-Null
+    }
+    $replyText.Text = if ($script:replyCards.Count) { [string]$script:replyCards[-1].text } else { '' }
+  } elseif (-not $hasList -and $null -ne $value.reply) {
+    # Compatibility for older clients which send only one preview string.
+    $nextReply = [string]$value.reply
+    if ($replyText.Text -ne $nextReply -or -not $replyArea.Children.Contains($defaultReplyCard)) {
+      $replyArea.Children.Clear()
+      if (-not [string]::IsNullOrWhiteSpace($nextReply)) { $replyArea.Children.Add($defaultReplyCard) | Out-Null }
       $replyText.Text = $nextReply
       $replyChanged = $true
+      $script:defaultStatusHost.Content = New-StatusDot $false
     }
   }
-  if ($null -ne $value.showReplyPreview) {
-    $nextVisibility = if ($value.showReplyPreview) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-    if ($replyButton.Visibility -ne $nextVisibility) { $replyButton.Visibility = $nextVisibility }
-    if (-not $value.showReplyPreview) { Set-Expanded $false }
-  }
-  if ($null -ne $value.expanded -and $replyButton.Visibility -eq 'Visible') { Set-Expanded ([bool]$value.expanded) }
+  if ($null -ne $value.showReplyPreview) { $script:previewEnabled = [bool]$value.showReplyPreview }
+  $hasReplies = $replyArea.Children.Count -gt 0 -and ($script:replyListMode -or -not [string]::IsNullOrWhiteSpace($replyText.Text))
+  $nextVisibility = if ($script:previewEnabled -and $hasReplies) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+  if ($replyButton.Visibility -ne $nextVisibility) { $replyButton.Visibility = $nextVisibility }
+  if ($null -ne $value.replyUnread) { $script:replyUnread = [Math]::Max(0, [int]$value.replyUnread) }
+  Update-Reply-Button
+  if ($replyButton.Visibility -ne 'Visible') { Set-Expanded $false }
+  elseif ($null -ne $value.expanded) { Set-Expanded ([bool]$value.expanded) }
   # Streaming replies update the text frequently. Re-measure only when the
   # text really changed; Update-Layout itself avoids assigning equal sizes.
   if ($replyChanged -and $script:expanded) { Update-Layout }
@@ -396,7 +649,7 @@ if ($SelfTest) {
   $textButton.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
   if ($textBox.Visibility -ne 'Visible' -or $window.Width -lt 300) { throw 'Text input is clipped' }
   Set-TextOpen $false
-  Apply-State ([pscustomobject]@{ phase = 'recording'; reply = '中文回复预览'; expanded = $true })
+  Apply-State ([pscustomobject]@{ phase = 'recording'; reply = '中文回复预览'; replyCount = 1; replies = @([pscustomobject]@{ sessionId = 'self-test'; text = '中文回复预览'; title = '测试会话'; state = 'done' }); replyUnread = 1; showReplyPreview = $true; expanded = $true })
   if ($voiceButton.Foreground -ne [System.Windows.Media.Brushes]::Tomato -or $replyText.Visibility -ne 'Visible') { throw 'State not rendered' }
   if ($PreviewPath) {
     $window.UpdateLayout()
@@ -420,7 +673,9 @@ if ($StateTest) {
   $heightDescriptor.AddValueChanged($window, [System.EventHandler]{ $script:heightChanges.Add($window.Height) })
 }
 
-$timer = [System.Windows.Threading.DispatcherTimer]::new()
+# Process incoming states ahead of continuous render/animation work. The
+# default Background priority can starve while an expanded preview animates.
+$timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Normal)
 $timer.Interval = [TimeSpan]::FromMilliseconds(50)
 $timer.Add_Tick({
   $line = $null
@@ -443,8 +698,18 @@ $timer.Add_Tick({
             width = $window.Width
             height = $window.Height
             heightChanges = @($script:heightChanges.ToArray())
+            cardCount = $replyArea.Children.Count
+            cardsGeneration = $script:cardsGeneration
+            replyVisible = ($replyArea.Visibility -eq 'Visible')
+            replyButtonVisible = ($replyButton.Visibility -eq 'Visible')
+            replyUnread = $script:replyUnread
           }
         }
+      } elseif ($StateTest -and $value.type -eq 'test-click-reply') {
+        $card = $replyArea.Children[[int]$value.index]
+        $click = [System.Windows.Input.MouseButtonEventArgs]::new([System.Windows.Input.Mouse]::PrimaryDevice, 0, [System.Windows.Input.MouseButton]::Left)
+        $click.RoutedEvent = [System.Windows.UIElement]::MouseLeftButtonUpEvent
+        $card.RaiseEvent($click)
       }
     } catch { Write-Event @{ type = 'error'; message = $_.Exception.Message } }
   }

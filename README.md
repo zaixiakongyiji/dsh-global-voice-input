@@ -4,6 +4,8 @@ Windows-only DSH Bundle. Press `Ctrl+Alt+Space` from any foreground application 
 
 The `0.2.0` UI adds a compact status pill in the composer. Its buttons use icons only: the left button opens direct text input, the middle icon changes with the recording state, and the right button expands a live preview of the current Session reply. On Windows, the same controls are also shown in a small always-on-top desktop overlay, so the status remains visible when DSH is unfocused or minimized. Drag an empty area of the capsule to move it; its position is kept while the overlay resizes for input or reply preview.
 
+悬浮窗按 Session 接收回复通知。生成开始后即可展开，首段正文到达前显示“正在思考…”。卡片只展示回复正文，过滤 reasoning；流式内容在完成时替换为同一条最终回复。当前正在查看的 Session 也保留生成中卡片，已读的完成回复则隐藏。点击卡片会聚焦 DSH，并通过 `uiWorkspace.openSession` 打开对应 Session；该 Session 打开且 DSH 获得焦点后才标记已读，展开预览不会标记已读。状态接口保留 `replies`、`replyCount`、`replyUnread`，供后续扩展多回复展示。按钮的悬停和按下高亮使用圆形背景。
+
 The plugin settings expose the shortcut, silence timeout, maximum recording duration, automatic submission, desktop overlay visibility, and reply preview visibility. The shortcut is captured by clicking its button and pressing a modifier-plus-key combination; `Esc` cancels that capture. The in-app icon bar is kept hidden while its background binding continues to track the active Session. Changes to the shortcut take effect after DSH reloads.
 
 Defaults are `Ctrl+Alt+Space`, `1200 ms` silence, `60 s` maximum duration, automatic submission enabled, and the desktop overlay enabled.

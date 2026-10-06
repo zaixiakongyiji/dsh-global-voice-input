@@ -237,19 +237,98 @@ const TYPERT_REMOTE = {
     function assistantText(event) {
       if (event?.type === 'assistant/live-chunk') {
         const chunk = event.data?.chunk
-        if (chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta') return chunk.text || ''
-        return chunk?.block?.text || ''
+        if (chunk?.type === 'text-delta') return chunk.text || ''
+        // block-end repeats the accumulated text; only deltas append to it.
+        return ''
       }
       if (event?.type === 'assistant/message') {
         const content = event.data?.message?.content
         if (!Array.isArray(content)) return ''
-        return content.filter((block) => block?.kind === 'text' || block?.kind === 'reasoning' || block?.type === 'text' || block?.type === 'reasoning').map((block) => block.text || '').join('')
+        return content.filter((block) => block?.kind === 'text' || block?.type === 'text').map((block) => block.text || '').join('')
       }
       return ''
     }
 
     function isReplyEvent(event) {
       return event?.type === 'assistant/live-chunk' || event?.type === 'assistant/message'
+    }
+
+    // Notifications are per reply, not per text delta. History replacement and
+    // pagination only hydrate the preview; they never create unread items.
+    function createReplySource(sessionId, isViewing) {
+      const source = createSnapshot({ text: '' })
+      source.items = []
+      let revision = -1
+      let running = false
+      const seen = new Set()
+      const publish = (text = source.get().text) => source.set({ text })
+      source.setRunning = (next) => {
+        if (running === next) return
+        running = next
+        if (next && !source.items.some(item => item.state === 'streaming')) {
+          source.items.push({ id: `${sessionId}:waiting`, text: '', state: 'streaming',
+            unread: !isViewing(), receivedAt: Date.now() })
+        } else if (!next) {
+          source.items = source.items.filter(item => item.state !== 'streaming')
+        }
+        publish()
+      }
+      source.clearPreview = () => publish('')
+      source.markRead = () => {
+        if (!source.items.some(item => item.unread)) return
+        source.items = source.items.map(item => ({ ...item, unread: false }))
+        publish()
+      }
+      source.consume = (snapshot) => {
+        if (!snapshot || revision === snapshot.revision) return
+        const initial = revision === -1
+        revision = snapshot.revision
+        const change = snapshot.change
+        const history = initial || change?.kind === 'replace' || change?.kind === 'prepend'
+        const rows = initial ? (snapshot.entries || change?.entries || [])
+          : change?.entries || (change?.entry ? [change.entry] : [])
+        let text = source.get().text
+        if (change?.kind === 'settle-assistant' && !change.entry) {
+          source.items = source.items.filter(item => item.attemptId !== change.attemptId)
+        }
+        for (const row of rows) {
+          const event = row.event || row
+          if (event.type === 'user/message') { if (change?.kind !== 'prepend') text = ''; continue }
+          if (!isReplyEvent(event)) continue
+          const final = event.type === 'assistant/message'
+          const body = assistantText(event)
+          const attemptId = event.data?.attemptId || change?.attemptId || 'current'
+          const turn = event.data?.turn
+          const step = event.data?.step
+          // Durable assistant/message has turn + step, but no attemptId.
+          // Match those fields before replacing the transient attempt.
+          const pending = source.items.find(item => item.state === 'streaming' && (
+            item.attemptId === attemptId || (turn !== undefined && step !== undefined && item.turn === turn && item.step === step)))
+          const pendingId = pending?.id || `${sessionId}:live:${attemptId}`
+          if (final) {
+            const messageId = event.data?.message?.id || event.seq || row.id || event.id
+            const id = `${sessionId}:${messageId ?? `revision:${revision}`}`
+            if (seen.has(id)) continue
+            seen.add(id)
+            if (change?.kind !== 'prepend') text = body
+            if (!history) source.items = source.items.filter(item => item.id !== pendingId && item.id !== `${sessionId}:waiting`)
+            if (body.trim() && !history) source.items.push({
+              id, text: body.slice(0, 4000), state: 'done', unread: !isViewing(), receivedAt: Date.now()
+            })
+          } else {
+            text = (pending?.text || '') + body
+            if (!history) {
+              const item = { id: pendingId, attemptId, turn, step, text: text.slice(-4000), state: 'streaming',
+                unread: pending ? pending.unread : !isViewing(), receivedAt: pending?.receivedAt || Date.now() }
+              source.items = source.items.filter(item => item.id !== pendingId && item.id !== `${sessionId}:waiting`)
+              source.items.push(item)
+            }
+          }
+        }
+        source.items = source.items.slice(-20)
+        publish(text)
+      }
+      return source
     }
     
     function VoiceInput({ sessionId, inputActions, locked, onActiveChange, controller }) {
@@ -357,7 +436,9 @@ const TYPERT_REMOTE = {
       }, [locked])
     
       const reply = controller.reply(sessionId)
-      const replyText = useSyncExternalStore(reply.subscribe, reply.get)
+      const replySnapshot = useSyncExternalStore(reply.subscribe, reply.get)
+      const replyText = replySnapshot.text
+      const notificationVersion = useSyncExternalStore(controller.notificationSource.subscribe, controller.notificationSource.get)
       const [expanded, setExpanded] = useState(false)
       const [inputOpen, setInputOpen] = useState(false)
       const [draft, setDraft] = useState('')
@@ -370,8 +451,11 @@ const TYPERT_REMOTE = {
         setDraft(''); setInputOpen(false)
       }
       useEffect(() => {
-        void controller.reportState(sessionId, { phase, level, message, reply: replyText, expanded, showReplyPreview: config.showReplyPreview !== false })
-      }, [controller, sessionId, phase, level, message, replyText, expanded, config.showReplyPreview])
+        void controller.reportState(sessionId, {
+          phase, level, message, reply: replyText, expanded,
+          showReplyPreview: config.showReplyPreview !== false
+        })
+      }, [controller, sessionId, phase, level, message, replyText, notificationVersion, expanded, config.showReplyPreview])
       // The composer slot is retained as an invisible controller only. All
       // user-facing controls live in the desktop overlay; rendering any DOM
       // here duplicates the native DSH composer and can leave a stale reply
@@ -490,20 +574,28 @@ const TYPERT_REMOTE = {
       }, VoiceSettings)))
     }
 
-    function registerUi(ctx, remoteGlobal, remoteSpeech) {
+    function registerUi(ctx, remoteGlobal, remoteSpeech, uiWorkspace) {
       const readiness = createSnapshot(null)
       const entries = new Map()
       const settings = createSnapshot({ silenceMs: DEFAULT_SILENCE_MS, maxDurationMs: DEFAULT_MAX_DURATION_MS, autoSubmit: true, showOverlay: true, showReplyPreview: true })
       const replies = new Map()
+      const notifications = createSnapshot(0)
       let latest = undefined
       let lastTrigger = ''
       let lastTriggerAt = 0
       let overlayRevision = Date.now()
       let overlayReportFailed = false
       let disposed = false
+      let lastOverlayState = { phase: 'idle', expanded: false }
+      let notificationScheduled = false
+      const watches = new Map()
+      const isViewing = (id) => uiWorkspace.selection.getSnapshot().sessionId === id
+        && watches.get(id)?.ready === true
+        && document.visibilityState === 'visible' && document.hasFocus()
       const controller = {
         register(id, entry) {
           entries.set(id, entry); latest = id
+          observeSession(id)
           return () => { if (entries.get(id) === entry) entries.delete(id); if (latest === id) latest = [...entries.keys()].at(-1) }
         },
         isSpeechReady() {
@@ -512,45 +604,47 @@ const TYPERT_REMOTE = {
         },
         settingsSource: settings,
         settings() { return settings.get() || {} },
+        notificationSource: notifications,
+        notificationItems() {
+          const summaries = ctx.sessions.list?.getSnapshot?.()?.byId || {}
+          return [...replies.entries()].flatMap(([sessionId, source]) => source.items
+            // Keep an active streaming reply visible even when the user is
+            // already viewing that Session (which intentionally makes it
+            // read immediately). Completed read replies stay hidden.
+            .filter((item) => item.unread || item.state === 'streaming')
+            .map((item) => ({ id: item.id, text: item.text, state: item.state,
+              unread: item.unread, receivedAt: item.receivedAt, sessionId,
+              title: summaries[sessionId]?.displayTitle || summaries[sessionId]?.title || `Session ${sessionId.slice(0, 8)}`
+            }))).sort((a, b) => a.receivedAt - b.receivedAt).slice(-20)
+        },
         reply(sessionId) {
           let source = replies.get(sessionId)
           if (source) return source
-          source = createSnapshot('')
-          const binding = ctx.sessions.binding(sessionId)
-          const eventSource = binding?.eventSource
-          if (eventSource?.subscribe) {
-            let revision = -1
-            const consume = () => {
-              const snapshot = eventSource.getSnapshot?.()
-              if (!snapshot || snapshot.revision === revision) return
-              revision = snapshot.revision
-              const change = snapshot.change
-              const entries = change?.entries || (change?.entry ? [change.entry] : [])
-              for (const item of entries) {
-                const event = item.event || item
-                if (event.type === 'user/message') source.set('')
-                if (isReplyEvent(event)) {
-                  const text = assistantText(event)
-                  if (!text) continue
-                  source.set(event.type === 'assistant/message' ? text : `${source.get()}${text}`)
-                }
-              }
-            }
-            source.dispose = eventSource.subscribe(consume)
-            consume()
-          }
-          source.disposeReply = () => { source.dispose?.(); replies.delete(sessionId) }
+          source = createReplySource(sessionId, () => isViewing(sessionId))
           replies.set(sessionId, source)
+          source.subscribe(() => notifications.set(notifications.get() + 1))
           return source
         },
-        clearReply(sessionId) { replies.get(sessionId)?.set('') },
+        clearReply(sessionId) { replies.get(sessionId)?.clearPreview() },
+        markReplyRead(sessionId) { replies.get(sessionId)?.markRead() },
+        openReply(sessionId) {
+          if (!sessionId || !ctx.sessions.list.getSnapshot().byId[sessionId]) return
+          // Navigation completion/foreground observation marks it read, never
+          // the click itself: a rejected or deleted target must stay unread.
+          uiWorkspace.openSession(sessionId)
+        },
         selection() { const catalog = readiness.get(); return catalog?.selection || {} },
         transcribe(request, signal) { return remoteSpeech.transcribe(request, signal) },
         async reportState(sessionId, state) {
+          if (disposed) return false
+          const selected = uiWorkspace.selection.getSnapshot().sessionId
+          if (sessionId && selected && sessionId !== selected) return false
+          lastOverlayState = { ...lastOverlayState, ...state, sessionId }
+          const replies = controller.notificationItems()
           try {
             // Remote calls resolve to { ok, value/error }; RPC failures do
             // not reject the promise and must be checked explicitly.
-            const result = await remoteGlobal.reportState({ sessionId, ...state, revision: ++overlayRevision })
+            const result = await remoteGlobal.reportState({ ...lastOverlayState, replies, replyCount: replies.length, replyUnread: replies.filter(item => item.state === 'done' && item.unread).length, revision: ++overlayRevision })
             if (!result?.ok) throw result?.error || new Error('No overlay state response')
             overlayReportFailed = false
             return result.value
@@ -562,6 +656,70 @@ const TYPERT_REMOTE = {
         }
       }
     
+      function observeSession(id) {
+        if (!id || watches.has(id) || disposed) return
+        // Retain the event feed when leaving a generating Session. Merely
+        // borrowing binding() would lose it as soon as the main view releases.
+        watches.set(id, {})
+        try {
+          const reference = ctx.sessions.retain(id, { source: 'globalVoiceNotifications' })
+          const source = controller.reply(id)
+          const feed = reference.binding.eventSource
+          const consume = () => source.consume(feed.getSnapshot())
+          const unsubscribe = feed.subscribe(consume)
+          const watch = { reference, unsubscribe, ready: false }
+          watches.set(id, watch)
+          consume()
+          reference.ready.then(() => {
+            if (disposed || watches.get(id) !== watch) return
+            watch.ready = true
+            if (isViewing(id)) controller.markReplyRead(id)
+          }).catch((error) => console.warn('[global-voice-input] 回复订阅失败', error))
+        } catch (error) {
+          watches.delete(id)
+          console.warn('[global-voice-input] 回复订阅失败', error)
+        }
+      }
+      function syncCatalog() {
+        if (disposed) return
+        const catalog = ctx.sessions.list.getSnapshot()
+        for (const id of catalog.ids || []) {
+          if (catalog.byId[id]?.running) observeSession(id)
+          replies.get(id)?.setRunning(Boolean(catalog.byId[id]?.running))
+        }
+        if (catalog.phase === 'ready') {
+          for (const [id, watch] of watches) {
+            if (catalog.byId[id]) continue
+            watches.delete(id)
+            watch.unsubscribe?.()
+            watch.reference?.release()
+            replies.delete(id)
+          }
+        }
+        notifications.set(notifications.get() + 1)
+      }
+      function readVisible() {
+        const id = uiWorkspace.selection.getSnapshot().sessionId
+        observeSession(id)
+        if (isViewing(id)) controller.markReplyRead(id)
+      }
+      const stopCatalog = ctx.sessions.list.subscribe(syncCatalog)
+      const stopSelection = uiWorkspace.selection.subscribe(readVisible)
+      const stopNotifications = notifications.subscribe(() => {
+        // Collapse repeated synchronous catalog/feed notifications into one
+        // report after the snapshot mutation is complete.
+        if (notificationScheduled) return
+        notificationScheduled = true
+        queueMicrotask(() => {
+          notificationScheduled = false
+          void controller.reportState(uiWorkspace.selection.getSnapshot().sessionId, lastOverlayState)
+        })
+      })
+      window.addEventListener('focus', readVisible)
+      document.addEventListener('visibilitychange', readVisible)
+      syncCatalog()
+      readVisible()
+
       const stream = ctx.remote.$stream({
         name: 'Global voice shortcut',
         open: (signal) => remoteGlobal.follow(signal),
@@ -584,6 +742,7 @@ const TYPERT_REMOTE = {
               if (event.action === 'voice') target?.voice?.()
               else if (event.action === 'openInput') target?.openInput?.()
               else if (event.action === 'toggleReply') target?.toggleReply?.()
+              else if (event.action === 'openReply') controller.openReply(event.sessionId)
               else if (event.action === 'submitText' && typeof event.text === 'string') target?.submitText?.(event.text)
             } else if (event.type === 'trigger' && event.id !== lastTrigger) {
               lastTrigger = event.id
@@ -629,6 +788,11 @@ const TYPERT_REMOTE = {
       }, VoiceInput)))
       return async () => {
         disposed = true
+        stopCatalog(); stopSelection(); stopNotifications()
+        window.removeEventListener('focus', readVisible)
+        document.removeEventListener('visibilitychange', readVisible)
+        for (const watch of watches.values()) { watch.unsubscribe?.(); watch.reference?.release() }
+        watches.clear()
         await Promise.allSettled([stream.dispose?.(), speechStream.dispose?.(), observing, observingSpeech])
         for (const entry of entries.values()) entry.cancel?.()
         entries.clear()
@@ -642,7 +806,7 @@ const TYPERT_REMOTE = {
     async function apply(ctx) {
       const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE)
       const settingsUi = ctx.inject(['configForms', 'slots'], registerSettings)
-      const ui = ctx.inject(['remote.globalVoice', 'remote.speech', 'slots', 'locale', 'sessions', 'conversation'], (inner) => registerUi(inner, inner.remote.globalVoice, inner.remote.speech))
+      const ui = ctx.inject(['remote.globalVoice', 'remote.speech', 'slots', 'locale', 'sessions', 'conversation', 'uiWorkspace'], (inner) => registerUi(inner, inner.remote.globalVoice, inner.remote.speech, inner.uiWorkspace))
       try { await ui } catch (error) { await ui.dispose(); await disposeRemote(); throw error }
       return async () => { await settingsUi.dispose(); await ui.dispose(); await disposeRemote() }
     }
