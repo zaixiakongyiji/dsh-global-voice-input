@@ -1,0 +1,8 @@
+- insert:
+    - id: global-voice-input
+      name: '@local/dsh-global-voice-input'
+      config:
+        enabled: true
+        hotkey: 'Ctrl+Alt+Space'
+
+

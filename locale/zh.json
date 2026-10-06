@@ -1,0 +1,4 @@
+{
+  "title": "全局语音输入",
+  "description": "按 Ctrl+Alt+Space 录音、转写，并自动提交到当前 DSH 会话。"
+}
