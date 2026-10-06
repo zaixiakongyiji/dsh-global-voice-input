@@ -95,15 +95,117 @@ function New-IconButton([string]$label, [string]$tooltip) {
   return $button
 }
 
-$iconText = [string][char]0x25B1
-$iconIdle = [string][char]0x2301
-$iconDown = [string][char]0x2304
-$iconUp = [string][char]0x2303
 $iconRecording = [string][char]0x25CF
 $iconTranscribing = [string][char]0x21BB
-$textButton = New-IconButton $iconText '打开文字输入'
-$voiceButton = New-IconButton $iconIdle '开始语音输入'
-$replyButton = New-IconButton $iconDown '展开回复'
+
+function New-KeyboardVisual() {
+  $canvas = [System.Windows.Controls.Canvas]::new()
+  $canvas.Width = 20
+  $canvas.Height = 20
+  $canvas.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+  $canvas.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+  # 键盘外框 (微圆角与半透白微填充)
+  $rect = [System.Windows.Shapes.Rectangle]::new()
+  $rect.Width = 15
+  $rect.Height = 10
+  $rect.RadiusX = 2.5
+  $rect.RadiusY = 2.5
+  $rect.Stroke = [System.Windows.Media.Brushes]::White
+  $rect.StrokeThickness = 1.7
+  $rect.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#25FFFFFF")
+  [System.Windows.Controls.Canvas]::SetLeft($rect, 2.5)
+  [System.Windows.Controls.Canvas]::SetTop($rect, 5)
+  $canvas.Children.Add($rect) | Out-Null
+
+  # 键盘内部按键与空格条
+  $keys = [System.Windows.Shapes.Path]::new()
+  $keys.Data = [System.Windows.Media.Geometry]::Parse("M 5.5,8 H 6.5 M 9.5,8 H 10.5 M 13.5,8 H 14.5 M 7,11.5 H 13")
+  $keys.Stroke = [System.Windows.Media.Brushes]::White
+  $keys.StrokeThickness = 1.5
+  $keys.StrokeStartLineCap = [System.Windows.Media.PenLineCap]::Round
+  $keys.StrokeEndLineCap = [System.Windows.Media.PenLineCap]::Round
+  $canvas.Children.Add($keys) | Out-Null
+
+  return $canvas
+}
+
+function New-ChevronVisual([bool]$up = $false) {
+  $canvas = [System.Windows.Controls.Canvas]::new()
+  $canvas.Width = 20
+  $canvas.Height = 20
+  $canvas.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+  $canvas.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+  $path = [System.Windows.Shapes.Path]::new()
+  # 舒展圆角 V 形，开角约 100 度，端点和拐角均为圆润，不尖锐（与图二一致）
+  $path.Data = if ($up) {
+    [System.Windows.Media.Geometry]::Parse("M 5.5,12.5 L 10,8.5 L 14.5,12.5")
+  } else {
+    [System.Windows.Media.Geometry]::Parse("M 5.5,8.5 L 10,12.5 L 14.5,8.5")
+  }
+  $path.Stroke = [System.Windows.Media.Brushes]::White
+  $path.StrokeThickness = 2.0
+  $path.StrokeStartLineCap = [System.Windows.Media.PenLineCap]::Round
+  $path.StrokeEndLineCap = [System.Windows.Media.PenLineCap]::Round
+  $path.StrokeLineJoin = [System.Windows.Media.PenLineJoin]::Round
+  $canvas.Children.Add($path) | Out-Null
+
+  return $canvas
+}
+
+$chevronDown = New-ChevronVisual $false
+$chevronUp = New-ChevronVisual $true
+
+function New-MicVisual([System.Windows.Media.Brush]$strokeBrush, [System.Windows.Media.Brush]$fillBrush) {
+  $canvas = [System.Windows.Controls.Canvas]::new()
+  $canvas.Width = 20
+  $canvas.Height = 20
+  $canvas.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+  $canvas.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+  # 拾音头 (Capsule) - 方案 C: 半透微填充
+  $rect = [System.Windows.Shapes.Rectangle]::new()
+  $rect.Width = 7
+  $rect.Height = 11
+  $rect.RadiusX = 3.5
+  $rect.RadiusY = 3.5
+  $rect.Stroke = $strokeBrush
+  $rect.StrokeThickness = 1.7
+  $rect.Fill = $fillBrush
+  [System.Windows.Controls.Canvas]::SetLeft($rect, 6.5)
+  [System.Windows.Controls.Canvas]::SetTop($rect, 1)
+  $canvas.Children.Add($rect) | Out-Null
+
+  # U形防震托架与支撑底座
+  $path = [System.Windows.Shapes.Path]::new()
+  $path.Data = [System.Windows.Media.Geometry]::Parse("M 4.5,7.5 A 5.5,5.5 0 0,0 15.5,7.5 M 10,13 L 10,17 M 6.5,17 L 13.5,17")
+  $path.Stroke = $strokeBrush
+  $path.StrokeThickness = 1.7
+  $path.StrokeStartLineCap = [System.Windows.Media.PenLineCap]::Round
+  $path.StrokeEndLineCap = [System.Windows.Media.PenLineCap]::Round
+  $path.StrokeLineJoin = [System.Windows.Media.PenLineJoin]::Round
+  $canvas.Children.Add($path) | Out-Null
+
+  return $canvas
+}
+
+$micIdle = New-MicVisual ([System.Windows.Media.Brushes]::White) ([System.Windows.Media.BrushConverter]::new().ConvertFromString('#40FFFFFF'))
+$micRequesting = New-MicVisual ([System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFF59E0B')) ([System.Windows.Media.BrushConverter]::new().ConvertFromString('#40F59E0B'))
+
+$micBreatheAnim = [System.Windows.Media.Animation.DoubleAnimation]::new()
+$micBreatheAnim.From = 1.0
+$micBreatheAnim.To = 0.35
+$micBreatheAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(750))
+$micBreatheAnim.AutoReverse = $true
+$micBreatheAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+
+$textButton = New-IconButton '' '打开文字输入'
+$textButton.Content = New-KeyboardVisual
+$voiceButton = New-IconButton '' '开始语音输入'
+$voiceButton.Content = $micIdle
+$replyButton = New-IconButton '' '展开回复'
+$replyButton.Content = $chevronDown
 $wavePanel = [System.Windows.Controls.StackPanel]::new()
 $wavePanel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
 $wavePanel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
@@ -177,7 +279,7 @@ function Set-Expanded([bool]$expanded) {
   if ($script:expanded -eq $expanded) { return }
   $script:expanded = $expanded
   $replyText.Visibility = if ($expanded) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-  $replyButton.Content = if ($expanded) { $iconUp } else { $iconDown }
+  $replyButton.Content = if ($expanded) { $chevronUp } else { $chevronDown }
   $replyButton.ToolTip = if ($expanded) { '收起回复' } else { '展开回复' }
   if ($expanded -and [string]::IsNullOrWhiteSpace($replyText.Text)) { $replyText.Text = '等待当前 Session 回复…' }
   Update-Layout
@@ -214,18 +316,26 @@ function Set-Visual-Phase([string]$nextPhase, [double]$level = 0) {
   $script:phase = $resolvedPhase
   $script:audioLevel = [Math]::Max(0, [Math]::Min(1, $level))
   if ($script:phase -eq 'recording') {
-    if ($phaseChanged) { $voiceButton.Content = $wavePanel }
+    if ($phaseChanged) {
+      $micRequesting.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+      $voiceButton.Content = $wavePanel
+    }
     $factors = @(0.35, 0.62, 1.0, 0.72, 1.0, 0.62, 0.35)
     for ($index = 0; $index -lt $waveBars.Count; $index++) {
       $waveBars[$index].Height = 6 + (22 * $script:audioLevel * $factors[$index])
     }
   } elseif ($phaseChanged) {
-    $voiceButton.Content = switch ($script:phase) {
-      'requesting' { [string][char]0x25CC }
-      'transcribing' { $iconTranscribing }
-      'feedback' { '!' }
-      'waiting' { '…' }
-      default { $iconIdle }
+    if ($script:phase -eq 'requesting') {
+      $voiceButton.Content = $micRequesting
+      $micRequesting.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $micBreatheAnim)
+    } else {
+      $micRequesting.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+      $voiceButton.Content = switch ($script:phase) {
+        'transcribing' { $iconTranscribing }
+        'feedback' { '!' }
+        'waiting' { '…' }
+        default { $micIdle }
+      }
     }
   }
   if (-not $phaseChanged) { return }
@@ -251,6 +361,7 @@ $root.Add_MouseLeftButtonDown({ param($sender, $event)
 
 $window.Add_Closed({
   if ($null -ne $timer) { $timer.Stop() }
+  $micRequesting.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
   [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
 })
 $window.Show() | Out-Null
